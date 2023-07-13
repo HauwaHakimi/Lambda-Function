@@ -1,0 +1,109 @@
+import boto3
+import logging
+import json
+from urllib.parse import unquote_plus
+import uuid
+import pandas as pd
+from io import StringIO
+
+def extract_text(response, extract_by):
+    return [block['Text'] for block in response['Blocks'] if block['BlockType'] == extract_by]
+
+def analyze_medical_entities(text):
+    comprehend_medical = boto3.client('comprehendmedical')
+    return comprehend_medical.detect_entities(Text=text)
+
+def process_error(e):
+    if isinstance(e, botocore.exceptions.NoCredentialsError):
+        return "No AWS credentials were found."
+    elif isinstance(e, boto3.exceptions.S3UploadFailedError):
+        return "Failed to upload file to S3."
+    else:
+        return "An error occurred during processing."
+
+def write_to_csv(response, bucket_name, file_name):
+    data = []
+    for entity in response['Entities']:
+        data.append([entity['Text'], entity['Category'], entity['Type'], entity['Score'], entity['BeginOffset'], entity['EndOffset']])
+
+    df = pd.DataFrame(data, columns=['Text', 'Category', 'Type', 'Score', 'BeginOffset', 'EndOffset'])
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer)
+
+    s3 = boto3.resource('s3')
+    s3.Object(bucket_name, file_name).put(Body=csv_buffer.getvalue())
+
+def lambda_handler(event, context):
+    textract = boto3.client("textract")
+    s3 = boto3.client("s3")
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    try:
+        if "Records" in event:
+            file_obj = event["Records"][0]
+            bucket_name = "your-input-bucket-name" 
+            file_name = unquote_plus(str(file_obj["s3"]["object"]["key"]))
+
+            logger.info(f"Bucket: {bucket_name} ::: Key: {file_name}")
+
+            response = textract.detect_document_text(
+                Document={
+                    "S3Object": {
+                        "Bucket": bucket_name,
+                        "Name": file_name,
+                    }
+                }
+            )
+            logger.info(json.dumps(response))
+
+            raw_text = extract_text(response, extract_by="LINE")
+            logger.info(raw_text)
+
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=f"output/{file_name.split('/')[-1]}_{uuid.uuid4().hex}.txt",
+                Body=str("\n".join(raw_text)),
+            )
+
+            analyze_response = analyze_medical_entities("\n".join(raw_text))
+            logger.info(json.dumps(analyze_response))
+
+            write_to_csv(analyze_response, "your-output-bucket-name", f"{file_name.split('/')[-1]}_{uuid.uuid4().hex}.csv")
+
+            return {
+                "statusCode": 200,
+                "body": json.dumps("Document processed and analyzed successfully!"),
+            }
+    except Exception as e:
+        error_msg = process_error(e)
+        logger.error(f"Error message: {e}. Detail: {error_msg}")
+
+    return {"statusCode": 500, "body": json.dumps("Error processing the document!")}
+            logger.info(json.dumps(response))
+
+            raw_text = extract_text(response, extract_by="LINE")
+            logger.info(raw_text)
+
+            s3.put_object(
+                Bucket=bucketname,
+                Key=f"output/{filename.split('/')[-1]}_{uuid.uuid4().hex}.txt",
+                Body=str("\n".join(raw_text)),
+            )
+
+            analyze_response = analyze_medical_entities("\n".join(raw_text))
+            logger.info(json.dumps(analyze_response))
+
+            results_bucketname = "analysed-minet-green-documents-results"
+            csv_key = f"output/{filename.split('/')[-1]}_{uuid.uuid4().hex}.csv"
+            write_analysis_to_csv(analyze_response["Entities"], s3, results_bucketname, csv_key)
+
+            return {
+                "statusCode": 200,
+                "body": json.dumps("Document processed and analyzed successfully!"),
+            }
+    except Exception as e:
+        error_msg = process_error(e)
+        logger.error(f"Error message: {e}. Detail: {error_msg}")
+
+    return {"statusCode": 500, "body": json.dumps("Error processing the document!")}
